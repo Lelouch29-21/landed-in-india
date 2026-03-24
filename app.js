@@ -66,6 +66,7 @@ const STORAGE_KEYS = {
   history: "landed-in-india-search-history",
   lastRun: "landed-in-india-last-run",
   exchangeRates: "landed-in-india-exchange-rates",
+  sourceCache: "landed-in-india-source-cache",
 };
 
 const IMPORT_MODE_DETAILS = {
@@ -101,6 +102,10 @@ const DEFAULT_SETTINGS = {
 const DEFAULT_EXCHANGE_RATES = {
   USD: 93.85,
 };
+
+const SOURCE_CACHE_VERSION = 1;
+const SOURCE_CACHE_TTL_MS = 1000 * 60 * 60 * 12;
+const MAX_SOURCE_CACHE_ENTRIES = 32;
 
 const ACCESSORY_KEYWORDS = [
   "case",
@@ -148,6 +153,7 @@ const state = {
   settings: { ...DEFAULT_SETTINGS },
   exchangeRates: { ...DEFAULT_EXCHANGE_RATES },
   ratesUpdatedAt: null,
+  sourceCache: {},
   sourceStatuses: Object.fromEntries(
     SOURCE_DEFINITIONS.map((source) => [source.id, { state: "idle", detail: "" }])
   ),
@@ -221,6 +227,11 @@ function hydrateState() {
       ...exchangePayload.rates,
     };
     state.ratesUpdatedAt = exchangePayload.updatedAt ?? null;
+  }
+
+  const cachedSourcePayload = readStorage(STORAGE_KEYS.sourceCache, null);
+  if (cachedSourcePayload?.version === SOURCE_CACHE_VERSION) {
+    state.sourceCache = pruneSourceCacheEntries(cachedSourcePayload.entries ?? {});
   }
 
   const storedTheme = localStorage.getItem(STORAGE_KEYS.theme);
@@ -441,9 +452,16 @@ async function searchSource(source, query) {
       .filter((offer) => Number.isFinite(offer.price) && offer.price > 0);
 
     const ranked = rankOffersForQuery(parsed, query).slice(0, source.maxResults);
+    writeSourceCache(source.id, query, ranked);
     setSourceStatus(source.id, "success", `${ranked.length} offers`);
     return ranked;
   } catch (error) {
+    const cachedOffers = readSourceCache(source.id, query);
+    if (cachedOffers?.length) {
+      setSourceStatus(source.id, "success", `${cachedOffers.length} saved offers`);
+      return cachedOffers;
+    }
+
     setSourceStatus(source.id, "error", error.message);
     state.errors.push(`${source.label}: ${error.message}`);
     return [];
@@ -488,6 +506,12 @@ function buildReaderUrl(targetUrl) {
 }
 
 function parseAmazonMarkdown(text) {
+  const linkedOffers = parseAmazonLinkedMarkdown(text);
+  const plainOffers = parseAmazonPlainTextResults(text);
+  return dedupeParsedOffers([...linkedOffers, ...plainOffers]);
+}
+
+function parseAmazonLinkedMarkdown(text) {
   const offers = [];
   const lines = text.split(/\r?\n/);
   let pending = null;
@@ -532,6 +556,35 @@ function parseAmazonMarkdown(text) {
   return offers;
 }
 
+function parseAmazonPlainTextResults(text) {
+  const offers = [];
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => cleanTitle(line))
+    .filter(Boolean);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index] !== "Price, product page") {
+      continue;
+    }
+
+    const title = pickAmazonPlainTextTitle(lines, index);
+    const price = pickAmazonPlainTextPrice(lines, index + 1);
+    if (!title || !Number.isFinite(price)) {
+      continue;
+    }
+
+    offers.push({
+      title,
+      url: buildAmazonSearchUrl(title),
+      image: "",
+      price,
+    });
+  }
+
+  return offers;
+}
+
 function parseCromaMarkdown(text) {
   const offers = [];
   const regex =
@@ -547,6 +600,18 @@ function parseCromaMarkdown(text) {
   }
 
   return offers;
+}
+
+function dedupeParsedOffers(offers) {
+  const seen = new Set();
+  return offers.filter((offer) => {
+    const key = `${normalizeForMatch(offer.title)}::${offer.price}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function parseEbayMarkdown(text) {
@@ -1392,6 +1457,7 @@ function renderHistory() {
 }
 
 function renderStorageSummary() {
+  const cachedSourceCount = Object.keys(state.sourceCache).length;
   const items = [
     {
       label: "Saved deals",
@@ -1407,6 +1473,11 @@ function renderStorageSummary() {
       label: "Latest scan",
       value: state.lastRun?.results?.length ? `${state.lastRun.results.length}` : "0",
       body: "Most recent successful result set restored when you revisit the page.",
+    },
+    {
+      label: "Source cache",
+      value: String(cachedSourceCount),
+      body: "Recent source hits reused when a store is slow or temporarily rate-limited.",
     },
   ];
 
@@ -1671,6 +1742,162 @@ function dedupeOffers(offers) {
     seen.add(key);
     return true;
   });
+}
+
+function buildAmazonSearchUrl(query) {
+  return `https://www.amazon.in/s?k=${encodeURIComponent(query).replace(/%20/g, "+")}`;
+}
+
+function pickAmazonPlainTextTitle(lines, priceLineIndex) {
+  let bestCandidate = "";
+  let bestScore = -1;
+  const startIndex = Math.max(0, priceLineIndex - 12);
+
+  for (let index = startIndex; index < priceLineIndex; index += 1) {
+    const candidate = lines[index];
+    if (!isLikelyAmazonTitle(candidate)) {
+      continue;
+    }
+
+    const tokens = splitTokens(normalizeForMatch(candidate));
+    let score = 0;
+    if (tokens.length >= 2) {
+      score += 2;
+    }
+    if (tokens.length >= 4) {
+      score += 1;
+    }
+    if (candidate.length >= 24) {
+      score += 1;
+    }
+    if (index >= priceLineIndex - 4) {
+      score += 1.5;
+    }
+    if (tokens.some((token) => /\d/.test(token))) {
+      score += 0.5;
+    }
+
+    if (score > bestScore) {
+      bestCandidate = candidate;
+      bestScore = score;
+    }
+  }
+
+  return bestCandidate;
+}
+
+function pickAmazonPlainTextPrice(lines, startIndex) {
+  for (let index = startIndex; index < Math.min(lines.length, startIndex + 5); index += 1) {
+    const match = lines[index].match(/^₹([\d,]+(?:\.\d+)?)/);
+    if (match) {
+      return parseNumericPrice(match[1]);
+    }
+  }
+  return Number.NaN;
+}
+
+function isLikelyAmazonTitle(line) {
+  if (!line) {
+    return false;
+  }
+
+  if (/^₹[\d,]+(?:\.\d+)?$/.test(line) || /^M\.R\.P:/i.test(line)) {
+    return false;
+  }
+
+  if (
+    /^(results|amazon's choice|limited time deal|deal of the day|add to cart|currently unavailable|options|service:|top reviewed|best seller|sponsored)$/i.test(
+      line
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    /^\d+(?:\.\d+)?$/.test(line) ||
+    /out of 5 stars/i.test(line) ||
+    /bought in past month/i.test(line) ||
+    /delivery/i.test(line) ||
+    /coupon/i.test(line) ||
+    /back with amazon/i.test(line) ||
+    /returns?/i.test(line) ||
+    /save \d+%/i.test(line)
+  ) {
+    return false;
+  }
+
+  if (!/[a-z]/i.test(line)) {
+    return false;
+  }
+
+  const tokens = splitTokens(normalizeForMatch(line));
+  if (!tokens.length) {
+    return false;
+  }
+
+  return tokens.length >= 2 || line.length >= 18;
+}
+
+function getSourceCacheKey(sourceId, query) {
+  return `${sourceId}::${normalizeForMatch(query)}`;
+}
+
+function readSourceCache(sourceId, query) {
+  const key = getSourceCacheKey(sourceId, query);
+  const entry = state.sourceCache[key];
+  if (!entry?.updatedAt || !Array.isArray(entry.offers)) {
+    return null;
+  }
+
+  const isExpired =
+    Date.now() - new Date(entry.updatedAt).getTime() > SOURCE_CACHE_TTL_MS;
+  if (isExpired) {
+    delete state.sourceCache[key];
+    persistSourceCache();
+    return null;
+  }
+
+  return entry.offers.map((offer) => ({ ...offer }));
+}
+
+function writeSourceCache(sourceId, query, offers) {
+  if (!offers.length) {
+    return;
+  }
+
+  state.sourceCache[getSourceCacheKey(sourceId, query)] = {
+    updatedAt: new Date().toISOString(),
+    offers: offers.map((offer) => ({ ...offer })),
+  };
+  persistSourceCache();
+}
+
+function pruneSourceCacheEntries(entries) {
+  const validEntries = Object.entries(entries)
+    .filter(([, entry]) => {
+      if (!entry?.updatedAt || !Array.isArray(entry.offers) || !entry.offers.length) {
+        return false;
+      }
+      return Date.now() - new Date(entry.updatedAt).getTime() <= SOURCE_CACHE_TTL_MS;
+    })
+    .sort(
+      (left, right) =>
+        new Date(right[1].updatedAt).getTime() - new Date(left[1].updatedAt).getTime()
+    )
+    .slice(0, MAX_SOURCE_CACHE_ENTRIES);
+
+  return Object.fromEntries(validEntries);
+}
+
+function persistSourceCache() {
+  state.sourceCache = pruneSourceCacheEntries(state.sourceCache);
+  localStorage.setItem(
+    STORAGE_KEYS.sourceCache,
+    JSON.stringify({
+      version: SOURCE_CACHE_VERSION,
+      entries: state.sourceCache,
+    })
+  );
 }
 
 function getSystemTheme() {
