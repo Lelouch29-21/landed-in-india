@@ -470,7 +470,8 @@ body[data-theme="dark"] .hero {
 .settings-grid,
 .saved-grid,
 .results-grid,
-.disclaimer-grid {
+.disclaimer-grid,
+.issues-list {
   display: grid;
   gap: 1rem;
 }
@@ -779,6 +780,29 @@ body[data-theme="dark"] .hero {
   margin: 0.25rem 0 0;
   font-size: 0.93rem;
   line-height: 1.5;
+}
+
+.issues-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.issue-card {
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+  border-radius: 1.1rem;
+  background: color-mix(in srgb, var(--panel-soft) 82%, rgba(216, 78, 91, 0.08));
+}
+
+.issue-card h3 {
+  margin: 0;
+  font-size: 1rem;
+  letter-spacing: -0.03em;
+}
+
+.issue-card p {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  line-height: 1.55;
 }
 
 .toolbar {
@@ -1131,7 +1155,8 @@ select:disabled {
   .spotlight-grid,
   .results-grid,
   .saved-grid,
-  .disclaimer-grid {
+  .disclaimer-grid,
+  .issues-list {
     grid-template-columns: 1fr;
   }
 

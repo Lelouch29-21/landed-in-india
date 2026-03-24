@@ -102,6 +102,38 @@ const DEFAULT_EXCHANGE_RATES = {
   USD: 93.85,
 };
 
+const ACCESSORY_KEYWORDS = [
+  "case",
+  "cover",
+  "charger",
+  "charging",
+  "cable",
+  "adapter",
+  "screen",
+  "protector",
+  "tempered",
+  "glass",
+  "skin",
+  "wallet",
+  "mount",
+  "holder",
+  "tripod",
+  "power",
+  "bank",
+  "ssd",
+  "earbuds",
+  "earphones",
+  "headphones",
+  "sticker",
+  "strap",
+  "dock",
+  "stand",
+  "lens",
+  "accessory",
+  "accessories",
+  "magsafe",
+];
+
 const state = {
   query: "",
   results: [],
@@ -139,6 +171,8 @@ const elements = {
   bestOverall: document.querySelector("#best-overall"),
   resultCountNote: document.querySelector("#result-count-note"),
   spotlightGrid: document.querySelector("#spotlight-grid"),
+  issuesPanel: document.querySelector("#issues-panel"),
+  issuesList: document.querySelector("#issues-list"),
   restoreLastButton: document.querySelector("#restore-last-button"),
   refreshFxButton: document.querySelector("#refresh-fx-button"),
   modeSelect: document.querySelector("#mode-select"),
@@ -368,20 +402,27 @@ async function performSearch(query) {
   renderAll();
 
   if (hasActiveImportSource()) {
-    await maybeRefreshExchangeRate({ silent: true });
+    maybeRefreshExchangeRate({ silent: true }).catch((error) => {
+      console.warn(error);
+    });
   }
 
-  const activeSources = getActiveSources();
-  const searchTasks = activeSources.map((source) => searchSource(source, trimmedQuery));
-  const taskResults = await Promise.all(searchTasks);
+  try {
+    const activeSources = getActiveSources();
+    const searchTasks = activeSources.map((source) => searchSource(source, trimmedQuery));
+    const taskResults = await Promise.all(searchTasks);
 
-  const merged = dedupeOffers(taskResults.flat());
-  state.results = decorateOffers(merged);
-  state.searching = false;
-
-  updateHistory(trimmedQuery, state.results.length);
-  persistLastRun();
-  renderAll();
+    const merged = dedupeOffers(taskResults.flat());
+    state.results = decorateOffers(merged);
+    updateHistory(trimmedQuery, state.results.length);
+    persistLastRun();
+  } catch (error) {
+    console.warn(error);
+    state.errors.push(error.message || "Search failed unexpectedly.");
+  } finally {
+    state.searching = false;
+    renderAll();
+  }
 }
 
 async function searchSource(source, query) {
@@ -411,16 +452,14 @@ async function searchSource(source, query) {
 
 async function fetchSourceText(source, query) {
   const proxyUrl = buildProxyReaderUrl(source.buildSearchUrl(query));
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), 18000);
+  const timeoutMs = 12000;
 
   try {
-    const response = await fetch(proxyUrl, {
-      signal: controller.signal,
+    const response = await fetchWithTimeout(proxyUrl, {
       headers: {
         Accept: "text/plain",
       },
-    });
+    }, timeoutMs);
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
@@ -436,12 +475,10 @@ async function fetchSourceText(source, query) {
 
     return text;
   } catch (error) {
-    if (error.name === "AbortError") {
+    if (error.name === "AbortError" || /timed out/i.test(error.message)) {
       throw new Error("Timed out");
     }
     throw error;
-  } finally {
-    window.clearTimeout(timer);
   }
 }
 
@@ -589,9 +626,15 @@ function rankOffersForQuery(offers, query) {
   const normalizedQuery = normalizeForMatch(query);
   const queryTokens = splitTokens(normalizedQuery);
   const hasNumericToken = queryTokens.some((token) => /\d/.test(token));
+  const queryLooksAccessory = looksLikeAccessory(queryTokens);
   const withScore = offers.map((offer) => ({
     ...offer,
-    relevanceScore: computeRelevanceScore(offer.title, normalizedQuery, queryTokens),
+    relevanceScore: computeRelevanceScore(
+      offer.title,
+      normalizedQuery,
+      queryTokens,
+      queryLooksAccessory
+    ),
   }));
 
   const exactMatches = withScore.filter((offer) => offer.relevanceScore >= 3);
@@ -620,15 +663,20 @@ function rankOffersForQuery(offers, query) {
   });
 }
 
-function computeRelevanceScore(title, normalizedQuery, queryTokens) {
+function computeRelevanceScore(title, normalizedQuery, queryTokens, queryLooksAccessory) {
   const normalizedTitle = normalizeForMatch(title);
   if (!normalizedTitle) {
     return 0;
   }
 
   const titleTokens = splitTokens(normalizedTitle);
+  const titleLooksAccessory = looksLikeAccessory(titleTokens);
 
-  if (normalizedQuery && normalizedTitle.includes(normalizedQuery)) {
+  if (!queryLooksAccessory && titleLooksAccessory) {
+    return 0.1;
+  }
+
+  if (queryTokens.length > 0 && hasExactSequence(titleTokens, queryTokens)) {
     return 3;
   }
 
@@ -682,6 +730,27 @@ function hasTightOrderedMatch(titleTokens, queryTokens, maxGap) {
       currentIndex = foundIndex;
     }
 
+    if (matched) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasExactSequence(titleTokens, queryTokens) {
+  if (!titleTokens.length || !queryTokens.length || queryTokens.length > titleTokens.length) {
+    return false;
+  }
+
+  for (let startIndex = 0; startIndex <= titleTokens.length - queryTokens.length; startIndex += 1) {
+    let matched = true;
+    for (let tokenIndex = 0; tokenIndex < queryTokens.length; tokenIndex += 1) {
+      if (titleTokens[startIndex + tokenIndex] !== queryTokens[tokenIndex]) {
+        matched = false;
+        break;
+      }
+    }
     if (matched) {
       return true;
     }
@@ -807,11 +876,7 @@ async function refreshExchangeRate({ force = false, announce = false, silent = f
   }
 
   try {
-    const response = await fetch("https://api.frankfurter.app/latest?from=USD&to=INR");
-    if (!response.ok) {
-      throw new Error(`FX HTTP ${response.status}`);
-    }
-    const payload = await response.json();
+    const payload = await fetchExchangeRates();
     if (!payload?.rates?.INR) {
       throw new Error("FX payload missing INR");
     }
@@ -837,6 +902,64 @@ async function refreshExchangeRate({ force = false, announce = false, silent = f
         "FX refresh failed, so the last stored INR conversion is still in use.";
     }
   }
+}
+
+async function fetchExchangeRates() {
+  const primaryUrl = buildCorsProxyUrl(
+    "https://api.frankfurter.app/latest?from=USD&to=INR"
+  );
+  const fallbackUrl =
+    "https://api.exchangerate-api.com/v4/latest/USD";
+
+  try {
+    const response = await fetchWithTimeout(primaryUrl, {
+      headers: {
+        Accept: "application/json,text/plain",
+      },
+    }, 6000);
+    const text = await response.text();
+    const payload = JSON.parse(text);
+    if (payload?.rates?.INR) {
+      return payload;
+    }
+  } catch (error) {
+    console.warn(error);
+  }
+
+  const fallbackResponse = await fetchWithTimeout(
+    buildCorsProxyUrl(fallbackUrl),
+    {
+      headers: {
+        Accept: "application/json,text/plain",
+      },
+    },
+    6000
+  );
+  const fallbackText = await fallbackResponse.text();
+  const fallbackPayload = JSON.parse(fallbackText);
+  return {
+    rates: {
+      INR: fallbackPayload?.rates?.INR,
+    },
+  };
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+function buildCorsProxyUrl(targetUrl) {
+  return `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(targetUrl)}`;
 }
 
 function rerateStoredOffers({ preserveRender = false } = {}) {
@@ -929,6 +1052,7 @@ function renderAll() {
   renderHeaderMeta();
   renderSummary();
   renderSpotlights();
+  renderIssues();
   renderResults();
   renderSaved();
   renderHistory();
@@ -1055,6 +1179,26 @@ function renderSpotlights() {
     buildSpotlightCard("Best import route", bestImport, "Import"),
     buildSpotlightCard("Overall winner", bestOverall, "Overall"),
   ].join("");
+}
+
+function renderIssues() {
+  const hasIssues = state.errors.length > 0;
+  elements.issuesPanel.classList.toggle("hidden", !hasIssues);
+  if (!hasIssues) {
+    elements.issuesList.innerHTML = "";
+    return;
+  }
+
+  elements.issuesList.innerHTML = state.errors
+    .map(
+      (issue) => `
+        <article class="issue-card">
+          <h3>Source issue</h3>
+          <p>${escapeHtml(issue)}</p>
+        </article>
+      `
+    )
+    .join("");
 }
 
 function buildSpotlightCard(title, offer, badge) {
@@ -1476,6 +1620,10 @@ function splitTokens(text) {
     .split(" ")
     .map((token) => token.trim())
     .filter(Boolean);
+}
+
+function looksLikeAccessory(tokens) {
+  return tokens.some((token) => ACCESSORY_KEYWORDS.includes(token));
 }
 
 function cleanTitle(text) {
