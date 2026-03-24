@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Landed in India</title>
+    <meta
+      name="description"
+      content="Search Indian and global stores, compare landed cost in India, and save the best buying routes."
+    />
+    <meta name="theme-color" content="#0f1729" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Sora:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one" aria-hidden="true"></div>
+    <div class="ambient ambient-two" aria-hidden="true"></div>
+    <div class="ambient ambient-three" aria-hidden="true"></div>
+
+    <div class="page-shell">
+      <header class="topbar">
+        <a class="brand" href="./">
+          <span class="brand-mark">LI</span>
+          <span>
+            <strong>Landed in India</strong>
+            <small>Multi-store cost radar</small>
+          </span>
+        </a>
+
+        <div class="topbar-actions">
+          <button class="ghost-button" id="restore-last-button" type="button">
+            Restore last scan
+          </button>
+          <button class="theme-button" id="theme-toggle" type="button">
+            Switch theme
+          </button>
+        </div>
+      </header>
+
+      <main class="dashboard">
+        <section class="hero panel">
+          <div class="hero-copy">
+            <p class="eyebrow">Global Product Hunter</p>
+            <h1>Find the cheapest way to buy, ship, and land it in India.</h1>
+            <p class="hero-text">
+              Search supported Indian and international stores, estimate landed
+              import cost in INR, and keep your favorite deals saved in the
+              browser.
+            </p>
+
+            <form class="search-form" id="search-form">
+              <label class="visually-hidden" for="search-input">Product</label>
+              <input
+                id="search-input"
+                class="search-input"
+                type="search"
+                placeholder="Search a product, for example: iPhone 16, PS5 Slim, Marshall speaker"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button class="primary-button" id="search-button" type="submit">
+                Scan prices
+              </button>
+            </form>
+
+            <div class="quick-row">
+              <button class="quick-chip" data-quick-query="iphone 16" type="button">
+                iPhone 16
+              </button>
+              <button class="quick-chip" data-quick-query="playstation 5 slim" type="button">
+                PS5 Slim
+              </button>
+              <button class="quick-chip" data-quick-query="sony wh-1000xm5" type="button">
+                Sony XM5
+              </button>
+              <button class="quick-chip" data-quick-query="dj mini 4 pro" type="button">
+                DJI Mini 4 Pro
+              </button>
+            </div>
+
+            <div class="hero-meta">
+              <p class="hero-note" id="source-note">
+                4 live sources active. Domestic and import routes are ranked by
+                final India cost.
+              </p>
+              <p class="hero-note" id="last-updated">
+                No scan yet. Your saved deals live only in this browser.
+              </p>
+            </div>
+          </div>
+
+          <aside class="hero-side">
+            <article class="mini-panel">
+              <p class="panel-kicker">Live engine</p>
+              <div class="hero-stat-grid">
+                <div>
+                  <span>Theme</span>
+                  <strong id="theme-mode-label">Light</strong>
+                </div>
+                <div>
+                  <span>Saved deals</span>
+                  <strong id="saved-count-badge">0</strong>
+                </div>
+                <div>
+                  <span>FX</span>
+                  <strong id="fx-rate-display">1 USD = 93.85 INR</strong>
+                </div>
+                <div>
+                  <span>Import mode</span>
+                  <strong id="import-mode-badge">Personal buy</strong>
+                </div>
+              </div>
+            </article>
+
+            <article class="mini-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="panel-kicker">Active sources</p>
+                  <h2>Search lanes</h2>
+                </div>
+              </div>
+              <div class="source-chip-grid" id="source-toggle-list"></div>
+            </article>
+          </aside>
+        </section>
+
+        <section class="summary-grid" aria-label="Key stats">
+          <article class="metric-card">
+            <span class="metric-label">Offers found</span>
+            <strong class="metric-value" id="offers-count">0</strong>
+            <p class="metric-footnote">Live offers after filtering and dedupe.</p>
+          </article>
+
+          <article class="metric-card">
+            <span class="metric-label">Best India price</span>
+            <strong class="metric-value" id="best-domestic">-</strong>
+            <p class="metric-footnote">Cheapest domestic route right now.</p>
+          </article>
+
+          <article class="metric-card">
+            <span class="metric-label">Best import landed</span>
+            <strong class="metric-value" id="best-import">-</strong>
+            <p class="metric-footnote">Includes estimated India import duty.</p>
+          </article>
+
+          <article class="metric-card">
+            <span class="metric-label">Best overall landed</span>
+            <strong class="metric-value" id="best-overall">-</strong>
+            <p class="metric-footnote">Lowest final cost for delivery in India.</p>
+          </article>
+        </section>
+
+        <section class="panel spotlight-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Best plays</p>
+              <h2>What to buy and from where</h2>
+            </div>
+            <p class="section-note" id="result-count-note">
+              Run a search to see local versus import opportunities.
+            </p>
+          </div>
+          <div class="spotlight-grid" id="spotlight-grid"></div>
+        </section>
+
+        <section class="content-grid">
+          <div class="stack">
+            <section class="panel settings-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="panel-kicker">India import math</p>
+                  <h2>Landed cost settings</h2>
+                </div>
+                <button class="ghost-button small-button" id="refresh-fx-button" type="button">
+                  Refresh FX
+                </button>
+              </div>
+
+              <div class="settings-grid">
+                <label class="field">
+                  <span>Duty mode</span>
+                  <select id="mode-select">
+                    <option value="personal">Personal import (42.08%)</option>
+                    <option value="gift">Gift import (77.28%)</option>
+                    <option value="custom">Custom rate</option>
+                  </select>
+                </label>
+
+                <label class="field hidden" id="custom-duty-wrap">
+                  <span>Custom duty rate %</span>
+                  <input id="custom-duty-input" type="number" min="0" max="200" step="0.01" />
+                </label>
+
+                <label class="field">
+                  <span>Shipping buffer %</span>
+                  <input id="shipping-buffer-input" type="number" min="0" max="100" step="0.1" />
+                </label>
+
+                <label class="field">
+                  <span>Insurance %</span>
+                  <input id="insurance-input" type="number" min="0" max="20" step="0.1" />
+                </label>
+
+                <label class="field">
+                  <span>Handling fee (INR)</span>
+                  <input id="handling-fee-input" type="number" min="0" max="5000" step="1" />
+                </label>
+              </div>
+
+              <div class="formula-box" id="formula-note">
+                Personal imports use the default CBIC-style estimator here:
+                assessable value plus 42.08% duty, then any handling fee.
+              </div>
+            </section>
+
+            <section class="panel storage-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="panel-kicker">Browser storage</p>
+                  <h2>What stays saved</h2>
+                </div>
+              </div>
+
+              <div class="storage-list" id="storage-summary"></div>
+              <div class="panel-actions">
+                <button class="ghost-button small-button" id="clear-saved-button" type="button">
+                  Clear saved
+                </button>
+                <button class="ghost-button small-button" id="clear-history-button" type="button">
+                  Clear history
+                </button>
+              </div>
+            </section>
+          </div>
+
+          <section class="panel results-panel">
+            <div class="panel-head results-head">
+              <div>
+                <p class="panel-kicker">Market scan</p>
+                <h2>Ranked offers</h2>
+              </div>
+
+              <div class="toolbar">
+                <div class="filter-group" id="filter-group" role="tablist" aria-label="Result filters">
+                  <button class="filter-button active" data-filter="all" type="button">
+                    All
+                  </button>
+                  <button class="filter-button" data-filter="domestic" type="button">
+                    India
+                  </button>
+                  <button class="filter-button" data-filter="import" type="button">
+                    Import
+                  </button>
+                </div>
+
+                <label class="sort-field" for="sort-select">
+                  <span>Sort by</span>
+                  <select id="sort-select">
+                    <option value="landed">Landed cost</option>
+                    <option value="listed">Listed price</option>
+                    <option value="source">Source</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+
+            <div class="results-grid" id="results-grid"></div>
+            <p class="empty-state hidden" id="results-empty">
+              No offers match this view yet.
+            </p>
+          </section>
+        </section>
+
+        <section class="lower-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">Watchlist</p>
+                <h2>Saved offers</h2>
+              </div>
+            </div>
+            <div class="saved-grid" id="saved-grid"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">Memory</p>
+                <h2>Search history</h2>
+              </div>
+            </div>
+            <div class="history-list" id="history-list"></div>
+          </section>
+        </section>
+
+        <section class="panel disclaimer-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Notes</p>
+              <h2>How this estimator works</h2>
+            </div>
+          </div>
+
+          <div class="disclaimer-grid">
+            <article>
+              <h3>Static-host friendly</h3>
+              <p>
+                This site is designed for GitHub Pages, so this version scans
+                supported live sources with browser-safe fetches instead of a
+                private backend that indexes the whole web.
+              </p>
+            </article>
+
+            <article>
+              <h3>Import estimate, not customs clearance advice</h3>
+              <p>
+                The India landed-cost model is an estimate. Real customs duty
+                can change by category, courier handling, exemptions,
+                restrictions, and customs classification.
+              </p>
+            </article>
+
+            <article>
+              <h3>What gets saved</h3>
+              <p>
+                Theme, enabled sources, import settings, search history, saved
+                offers, and the latest successful scan all stay in this browser.
+              </p>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>
