@@ -451,11 +451,11 @@ async function searchSource(source, query) {
 }
 
 async function fetchSourceText(source, query) {
-  const proxyUrl = buildProxyReaderUrl(source.buildSearchUrl(query));
+  const readerUrl = buildReaderUrl(source.buildSearchUrl(query));
   const timeoutMs = 12000;
 
   try {
-    const response = await fetchWithTimeout(proxyUrl, {
+    const response = await fetchWithTimeout(readerUrl, {
       headers: {
         Accept: "text/plain",
       },
@@ -482,12 +482,9 @@ async function fetchSourceText(source, query) {
   }
 }
 
-function buildProxyReaderUrl(targetUrl) {
+function buildReaderUrl(targetUrl) {
   const normalizedUrl = targetUrl.replace(/^https?:\/\//, "");
-  const readerUrl = `https://r.jina.ai/http://${normalizedUrl}`;
-  return `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(
-    readerUrl
-  )}`;
+  return `https://r.jina.ai/http://${normalizedUrl}`;
 }
 
 function parseAmazonMarkdown(text) {
@@ -905,9 +902,7 @@ async function refreshExchangeRate({ force = false, announce = false, silent = f
 }
 
 async function fetchExchangeRates() {
-  const primaryUrl = buildCorsProxyUrl(
-    "https://api.frankfurter.app/latest?from=USD&to=INR"
-  );
+  const primaryUrl = "https://api.frankfurter.app/latest?from=USD&to=INR";
   const fallbackUrl =
     "https://api.exchangerate-api.com/v4/latest/USD";
 
@@ -926,15 +921,11 @@ async function fetchExchangeRates() {
     console.warn(error);
   }
 
-  const fallbackResponse = await fetchWithTimeout(
-    buildCorsProxyUrl(fallbackUrl),
-    {
-      headers: {
-        Accept: "application/json,text/plain",
-      },
+  const fallbackResponse = await fetchWithTimeout(fallbackUrl, {
+    headers: {
+      Accept: "application/json,text/plain",
     },
-    6000
-  );
+  }, 6000);
   const fallbackText = await fallbackResponse.text();
   const fallbackPayload = JSON.parse(fallbackText);
   return {
@@ -956,10 +947,6 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
   } finally {
     window.clearTimeout(timer);
   }
-}
-
-function buildCorsProxyUrl(targetUrl) {
-  return `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(targetUrl)}`;
 }
 
 function rerateStoredOffers({ preserveRender = false } = {}) {
