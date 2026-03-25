@@ -6,7 +6,7 @@ const SOURCE_DEFINITIONS = [
     marketLabel: "India",
     currency: "INR",
     maxResults: 6,
-    timeoutMs: 6500,
+    timeoutMs: 4200,
     buildSearchUrl(query) {
       return `https://www.amazon.in/s?k=${encodeURIComponent(query).replace(
         /%20/g,
@@ -22,7 +22,7 @@ const SOURCE_DEFINITIONS = [
     marketLabel: "India",
     currency: "INR",
     maxResults: 6,
-    timeoutMs: 5000,
+    timeoutMs: 3600,
     buildSearchUrl(query) {
       return `https://www.croma.com/searchB?q=${encodeURIComponent(
         `${query}:relevance`
@@ -31,13 +31,43 @@ const SOURCE_DEFINITIONS = [
     parser: parseCromaMarkdown,
   },
   {
+    id: "reliance-digital",
+    label: "Reliance Digital",
+    market: "domestic",
+    marketLabel: "India",
+    currency: "INR",
+    maxResults: 6,
+    timeoutMs: 3200,
+    buildSearchUrl(query) {
+      return `https://www.reliancedigital.in/ext/raven-api/catalog/v1.0/products?q=${encodeURIComponent(
+        query
+      )}`;
+    },
+    parser: parseRelianceDigitalMarkdown,
+  },
+  {
+    id: "vijay-sales",
+    label: "Vijay Sales",
+    market: "domestic",
+    marketLabel: "India",
+    currency: "INR",
+    maxResults: 6,
+    timeoutMs: 3200,
+    buildSearchUrl(query) {
+      return `https://www.vijaysales.com/api/graphql?query=${encodeURIComponent(
+        VIJAY_SALES_SEARCH_QUERY
+      )}&variables=${encodeURIComponent(JSON.stringify({ term: query }))}`;
+    },
+    parser: parseVijaySalesMarkdown,
+  },
+  {
     id: "ebay",
     label: "eBay",
     market: "import",
     marketLabel: "Global",
     currency: "USD",
     maxResults: 6,
-    timeoutMs: 6500,
+    timeoutMs: 4200,
     buildSearchUrl(query) {
       return `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query).replace(
         /%20/g,
@@ -53,7 +83,7 @@ const SOURCE_DEFINITIONS = [
     marketLabel: "Global",
     currency: "USD",
     maxResults: 6,
-    timeoutMs: 7000,
+    timeoutMs: 4500,
     buildSearchUrl(query) {
       return `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(
         query
@@ -68,7 +98,7 @@ const SOURCE_DEFINITIONS = [
     marketLabel: "Global",
     currency: "USD",
     maxResults: 5,
-    timeoutMs: 5500,
+    timeoutMs: 4200,
     buildSearchUrl(query) {
       return `https://www.walmart.com/search?q=${encodeURIComponent(query).replace(
         /%20/g,
@@ -84,7 +114,7 @@ const SOURCE_DEFINITIONS = [
     marketLabel: "Global",
     currency: "USD",
     maxResults: 5,
-    timeoutMs: 5000,
+    timeoutMs: 4000,
     buildSearchUrl(query) {
       return `https://www.bestbuy.com/site/searchpage.jsp?st=${encodeURIComponent(
         query
@@ -92,6 +122,26 @@ const SOURCE_DEFINITIONS = [
     },
     parser: parseBestBuyMarkdown,
   },
+];
+
+const VIJAY_SALES_SEARCH_QUERY =
+  "query SearchProducts($term: String!) { products(search: $term, pageSize: 6, currentPage: 1) { items { name sku url_key small_image { url } price_range { minimum_price { final_price { value currency } } } } } }";
+
+const SETTINGS_VERSION = 2;
+const DEFAULT_ENABLED_SOURCE_IDS = [
+  "amazon-in",
+  "croma",
+  "reliance-digital",
+  "vijay-sales",
+  "ebay",
+];
+const LEGACY_DEFAULT_SOURCE_IDS = [
+  "amazon-in",
+  "croma",
+  "ebay",
+  "aliexpress",
+  "walmart",
+  "bestbuy",
 ];
 
 const STORAGE_KEYS = {
@@ -126,7 +176,8 @@ const IMPORT_MODE_DETAILS = {
 };
 
 const DEFAULT_SETTINGS = {
-  enabledSources: SOURCE_DEFINITIONS.map((source) => source.id),
+  version: SETTINGS_VERSION,
+  enabledSources: [...DEFAULT_ENABLED_SOURCE_IDS],
   dutyMode: "personal",
   customDutyRate: 42.08,
   shippingBufferPercent: 8,
@@ -197,6 +248,7 @@ const state = {
   filter: "all",
   sort: "landed",
   searching: false,
+  backgroundSearching: false,
   errors: [],
   savedOffers: [],
   history: [],
@@ -265,10 +317,8 @@ async function init() {
 }
 
 function hydrateState() {
-  state.settings = {
-    ...DEFAULT_SETTINGS,
-    ...readStorage(STORAGE_KEYS.settings, DEFAULT_SETTINGS),
-  };
+  const storedSettings = readStorage(STORAGE_KEYS.settings, null);
+  state.settings = upgradeSettings(storedSettings);
   state.savedOffers = readStorage(STORAGE_KEYS.savedOffers, []);
   state.history = readStorage(STORAGE_KEYS.history, []);
   state.lastRun = readStorage(STORAGE_KEYS.lastRun, null);
@@ -299,6 +349,8 @@ function hydrateState() {
   if (state.query) {
     elements.searchInput.value = state.query;
   }
+
+  persistSettings();
 }
 
 function attachEventListeners() {
@@ -460,14 +512,34 @@ async function performSearch(query) {
   }
 
   const activeSources = getActiveSources();
+  const primarySources = getPrimarySources(activeSources);
+  const deepSources = activeSources.filter(
+    (source) => !primarySources.some((primarySource) => primarySource.id === source.id)
+  );
   const searchSessionId = state.searchSessionId + 1;
   const cachedSeed = activeSources.flatMap(
     (source) => readSourceCache(source.id, trimmedQuery) ?? []
   );
+  const liveResults = [];
+  const runBatch = async (sources) =>
+    Promise.all(
+      sources.map(async (source) => {
+        const sourceResults = await searchSource(source, trimmedQuery, searchSessionId);
+        if (!isSearchSessionActive(searchSessionId)) {
+          return sourceResults;
+        }
+
+        liveResults.push(...sourceResults);
+        state.results = decorateOffers(dedupeOffers([...cachedSeed, ...liveResults]));
+        renderSearchProgress();
+        return sourceResults;
+      })
+    );
 
   state.searchSessionId = searchSessionId;
   state.query = trimmedQuery;
   state.searching = true;
+  state.backgroundSearching = false;
   state.errors = [];
   state.results = decorateOffers(dedupeOffers(cachedSeed));
   resetSourceStatuses();
@@ -480,28 +552,33 @@ async function performSearch(query) {
   }
 
   try {
-    const liveResults = [];
-    const searchTasks = activeSources.map(async (source) => {
-      const sourceResults = await searchSource(source, trimmedQuery, searchSessionId);
-      if (!isSearchSessionActive(searchSessionId)) {
-        return sourceResults;
-      }
-
-      liveResults.push(...sourceResults);
-      state.results = decorateOffers(dedupeOffers([...cachedSeed, ...liveResults]));
-      renderSearchProgress();
-      return sourceResults;
-    });
-
-    const taskResults = await Promise.all(searchTasks);
+    const primaryResults = await runBatch(primarySources);
     if (!isSearchSessionActive(searchSessionId)) {
       return;
     }
 
-    const merged = dedupeOffers([...cachedSeed, ...taskResults.flat()]);
-    state.results = decorateOffers(merged);
+    state.results = decorateOffers(dedupeOffers([...cachedSeed, ...primaryResults.flat()]));
     updateHistory(trimmedQuery, state.results.length);
     persistLastRun();
+
+    if (!deepSources.length) {
+      state.searching = false;
+      renderAll();
+      return;
+    }
+
+    state.searching = false;
+    state.backgroundSearching = true;
+    renderAll();
+
+    void finishDeepSearchBatch({
+      searchSessionId,
+      query: trimmedQuery,
+      cachedSeed,
+      liveResults,
+      sources: deepSources,
+      runBatch,
+    });
   } catch (error) {
     if (!isSearchSessionActive(searchSessionId)) {
       return;
@@ -512,7 +589,41 @@ async function performSearch(query) {
     if (!isSearchSessionActive(searchSessionId)) {
       return;
     }
-    state.searching = false;
+    if (!state.backgroundSearching) {
+      state.searching = false;
+      renderAll();
+    }
+  }
+}
+
+async function finishDeepSearchBatch({
+  searchSessionId,
+  query,
+  cachedSeed,
+  liveResults,
+  sources,
+  runBatch,
+}) {
+  try {
+    const deepResults = await runBatch(sources);
+    if (!isSearchSessionActive(searchSessionId)) {
+      return;
+    }
+
+    state.results = decorateOffers(dedupeOffers([...cachedSeed, ...liveResults, ...deepResults.flat()]));
+    updateHistory(query, state.results.length);
+    persistLastRun();
+  } catch (error) {
+    if (!isSearchSessionActive(searchSessionId)) {
+      return;
+    }
+    console.warn(error);
+    state.errors.push(error.message || "Deep scan failed unexpectedly.");
+  } finally {
+    if (!isSearchSessionActive(searchSessionId)) {
+      return;
+    }
+    state.backgroundSearching = false;
     renderAll();
   }
 }
@@ -689,6 +800,65 @@ function parseCromaMarkdown(text) {
   }
 
   return offers;
+}
+
+function parseRelianceDigitalMarkdown(text) {
+  const payload = parseReaderJson(text, { sanitizeControlCharacters: true });
+  if (!Array.isArray(payload?.items)) {
+    return [];
+  }
+
+  return payload.items
+    .map((item) => {
+      const title = cleanRetailTitle(item?.name || item?.attributes?.description || "");
+      const price =
+        item?.price?.effective?.min ??
+        item?.price?.effective?.max ??
+        item?.price?.marked?.min ??
+        Number.NaN;
+      const slug = item?.slug;
+      const itemCode = item?.item_code;
+
+      return {
+        title,
+        url:
+          slug && itemCode
+            ? `https://www.reliancedigital.in/product/${slug}/p/${itemCode}`
+            : buildRelianceDigitalSearchUrl(title || item?.attributes?.description || ""),
+        image: item?.medias?.[0]?.url ?? "",
+        price: Number(price),
+        note: item?.brand?.name ? `${item.brand.name} · India retail` : "India retail",
+      };
+    })
+    .filter((offer) => offer.title);
+}
+
+function parseVijaySalesMarkdown(text) {
+  const payload = parseReaderJson(text);
+  const items = payload?.data?.products?.items;
+  if (!Array.isArray(items)) {
+    return [];
+  }
+
+  return items
+    .map((item) => {
+      const title = cleanRetailTitle(item?.name || "");
+      const price = item?.price_range?.minimum_price?.final_price?.value;
+      const sku = item?.sku;
+      const urlKey = item?.url_key;
+
+      return {
+        title,
+        url:
+          sku && urlKey
+            ? `https://www.vijaysales.com/p/${sku}/${urlKey}`
+            : buildVijaySalesSearchUrl(title),
+        image: item?.small_image?.url ?? "",
+        price: Number(price),
+        note: "India retail",
+      };
+    })
+    .filter((offer) => offer.title);
 }
 
 function dedupeParsedOffers(offers) {
@@ -1281,20 +1451,25 @@ function renderHeaderMeta() {
     (status) => status.state === "error"
   ).length;
 
-  const lastScanText = state.searching
-    ? loadingCount > 0
-      ? `Showing early matches while ${loadingCount} of ${activeSources.length} sources keep scanning for "${state.query}".`
-      : `Wrapping up the live scan for "${state.query}"...`
-    : state.lastRun?.searchedAt
-      ? `Last scan ${formatDateTime(state.lastRun.searchedAt)}. Saved data lives only in this browser.`
-      : "No scan yet. Your saved deals live only in this browser.";
+  const lastScanText =
+    state.searching
+      ? loadingCount > 0
+        ? `The core scan is running for "${state.query}" while early matches appear immediately.`
+        : `Wrapping up the core scan for "${state.query}"...`
+      : state.backgroundSearching
+        ? `The core scan is ready for "${state.query}". ${loadingCount} deep lane${loadingCount === 1 ? "" : "s"} is still filling in.`
+        : state.lastRun?.searchedAt
+          ? `Last scan ${formatDateTime(state.lastRun.searchedAt)}. Saved data lives only in this browser.`
+          : "No scan yet. Your saved deals live only in this browser.";
 
   elements.sourceNote.textContent =
     state.searching
-      ? `${activeSources.length} live sources active. Fast lanes return first and cached hits can appear immediately.`
-      : errorCount > 0
-      ? `${activeSources.length} live sources active. ${errorCount} source${errorCount > 1 ? "s" : ""} had issues in the last scan.`
-      : `${activeSources.length} live sources active. Domestic, import, and deep-source routes are ranked by final India cost.`;
+      ? `${activeSources.length} live sources active. India-first retail lanes lead the core scan and cached hits can appear immediately.`
+      : state.backgroundSearching
+        ? `${activeSources.length} live sources active. Core results are ready and the optional deep scan is still expanding coverage.`
+        : errorCount > 0
+          ? `${activeSources.length} live sources active. ${errorCount} source${errorCount > 1 ? "s" : ""} had issues in the last scan.`
+          : `${activeSources.length} live sources active. India-first retail lanes are on by default, with optional import lanes for deeper comparisons.`;
   elements.lastUpdated.textContent = lastScanText;
   elements.savedCountBadge.textContent = String(state.savedOffers.length);
   elements.fxRateDisplay.textContent = formatFxLine();
@@ -1305,16 +1480,19 @@ function renderHeaderMeta() {
   elements.themeToggle.textContent =
     state.theme === "dark" ? "Light mode" : "Dark mode";
   elements.searchButton.disabled = state.searching;
-  elements.searchButton.textContent = state.searching ? "Scanning..." : "Scan prices";
+  elements.searchButton.textContent = state.searching ? "Scanning India..." : "Scan prices";
   elements.restoreLastButton.disabled =
     state.searching || !state.lastRun?.results?.length;
-  elements.resultCountNote.textContent = state.searching
-    ? state.results.length
-      ? `${getVisibleResults().length} offers are visible already. Remaining sources are still filling in.`
-      : "Fast scan in progress..."
-    : state.results.length
-      ? `${getVisibleResults().length} visible of ${state.results.length} total offers.`
-      : "Run a search to see local versus import opportunities.";
+  elements.resultCountNote.textContent =
+    state.searching
+      ? state.results.length
+        ? `${getVisibleResults().length} offers are visible already while the core scan finishes.`
+        : "Core scan in progress..."
+      : state.backgroundSearching
+        ? `${getVisibleResults().length} offers are visible already while deep lanes keep filling in.`
+        : state.results.length
+          ? `${getVisibleResults().length} visible of ${state.results.length} total offers.`
+          : "Run a search to see local versus import opportunities.";
 }
 
 function renderSourceChips() {
@@ -1463,8 +1641,9 @@ function renderResults() {
   const loadingCount = Object.values(state.sourceStatuses).filter(
     (status) => status.state === "loading"
   ).length;
+  const showingLoadingState = state.searching || state.backgroundSearching;
 
-  if (state.searching && !visibleOffers.length) {
+  if (showingLoadingState && !visibleOffers.length) {
     elements.resultsEmpty.classList.add("hidden");
     elements.resultsGrid.innerHTML = Array.from({ length: 4 })
       .map(() => '<article class="loading-card" aria-hidden="true"></article>')
@@ -1480,7 +1659,7 @@ function renderResults() {
   }
 
   const cards = visibleOffers.map(buildOfferCard);
-  if (state.searching && loadingCount > 0) {
+  if (showingLoadingState && loadingCount > 0) {
     cards.push(
       ...Array.from({ length: Math.min(2, loadingCount) }).map(
         () => '<article class="loading-card loading-card-soft" aria-hidden="true"></article>'
@@ -1782,7 +1961,9 @@ function resetSourceStatuses() {
       source.id,
       {
         state: state.settings.enabledSources.includes(source.id) ? "idle" : "off",
-        detail: state.settings.enabledSources.includes(source.id) ? "Ready" : "Off",
+        detail: state.settings.enabledSources.includes(source.id)
+          ? getIdleSourceDetail(source)
+          : "Off",
       },
     ])
   );
@@ -1806,11 +1987,19 @@ function getActiveSources() {
   );
 }
 
+function getPrimarySources(activeSources) {
+  const coreSources = activeSources.filter(
+    (source) => source.market === "domestic" || source.id === "ebay"
+  );
+  return coreSources.length ? coreSources : activeSources;
+}
+
 function hasActiveImportSource() {
   return getActiveSources().some((source) => source.market === "import");
 }
 
 function persistSettings() {
+  state.settings.version = SETTINGS_VERSION;
   localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(state.settings));
 }
 
@@ -2110,6 +2299,75 @@ function getSystemTheme() {
   return window.matchMedia("(prefers-color-scheme: dark)").matches
     ? "dark"
     : "light";
+}
+
+function upgradeSettings(storedSettings) {
+  const merged = {
+    ...DEFAULT_SETTINGS,
+    ...(storedSettings ?? {}),
+  };
+  const sanitizedEnabledSources = sanitizeEnabledSources(merged.enabledSources);
+  const shouldMigrateToIndiaFirstDefaults =
+    !storedSettings?.version &&
+    hasExactSourceSelection(sanitizedEnabledSources, LEGACY_DEFAULT_SOURCE_IDS);
+
+  return {
+    ...merged,
+    version: SETTINGS_VERSION,
+    enabledSources: shouldMigrateToIndiaFirstDefaults
+      ? [...DEFAULT_ENABLED_SOURCE_IDS]
+      : sanitizedEnabledSources,
+  };
+}
+
+function sanitizeEnabledSources(enabledSources) {
+  const validIds = new Set(SOURCE_DEFINITIONS.map((source) => source.id));
+  const filtered = Array.isArray(enabledSources)
+    ? enabledSources.filter((sourceId) => validIds.has(sourceId))
+    : [];
+
+  return filtered.length ? filtered : [...DEFAULT_ENABLED_SOURCE_IDS];
+}
+
+function hasExactSourceSelection(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  const leftSet = new Set(left);
+  return right.every((sourceId) => leftSet.has(sourceId));
+}
+
+function getIdleSourceDetail(source) {
+  if (source.market === "domestic") {
+    return "India fast lane";
+  }
+  return source.id === "ebay" ? "Core import lane" : "Import deep lane";
+}
+
+function extractReaderContent(text) {
+  const marker = "Markdown Content:";
+  const markerIndex = text.indexOf(marker);
+  return cleanTitle(markerIndex >= 0 ? text.slice(markerIndex + marker.length) : text);
+}
+
+function parseReaderJson(text, options = {}) {
+  const content = extractReaderContent(text);
+  const safeContent = options.sanitizeControlCharacters
+    ? content.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ")
+    : content;
+  return JSON.parse(safeContent);
+}
+
+function buildRelianceDigitalSearchUrl(query) {
+  return `https://www.reliancedigital.in/search?q=${encodeURIComponent(query)}`;
+}
+
+function buildVijaySalesSearchUrl(query) {
+  return `https://www.vijaysales.com/search/${encodeURIComponent(query).replace(
+    /%20/g,
+    "+"
+  )}`;
 }
 
 function escapeHtml(value) {
