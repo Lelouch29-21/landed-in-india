@@ -6,6 +6,7 @@ const SOURCE_DEFINITIONS = [
     marketLabel: "India",
     currency: "INR",
     maxResults: 6,
+    timeoutMs: 6500,
     buildSearchUrl(query) {
       return `https://www.amazon.in/s?k=${encodeURIComponent(query).replace(
         /%20/g,
@@ -21,6 +22,7 @@ const SOURCE_DEFINITIONS = [
     marketLabel: "India",
     currency: "INR",
     maxResults: 6,
+    timeoutMs: 5000,
     buildSearchUrl(query) {
       return `https://www.croma.com/searchB?q=${encodeURIComponent(
         `${query}:relevance`
@@ -35,6 +37,7 @@ const SOURCE_DEFINITIONS = [
     marketLabel: "Global",
     currency: "USD",
     maxResults: 6,
+    timeoutMs: 6500,
     buildSearchUrl(query) {
       return `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query).replace(
         /%20/g,
@@ -50,12 +53,44 @@ const SOURCE_DEFINITIONS = [
     marketLabel: "Global",
     currency: "USD",
     maxResults: 6,
+    timeoutMs: 7000,
     buildSearchUrl(query) {
       return `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(
         query
       ).replace(/%20/g, "+")}`;
     },
     parser: parseAliExpressMarkdown,
+  },
+  {
+    id: "walmart",
+    label: "Walmart",
+    market: "import",
+    marketLabel: "Global",
+    currency: "USD",
+    maxResults: 5,
+    timeoutMs: 5500,
+    buildSearchUrl(query) {
+      return `https://www.walmart.com/search?q=${encodeURIComponent(query).replace(
+        /%20/g,
+        "+"
+      )}`;
+    },
+    parser: parseWalmartMarkdown,
+  },
+  {
+    id: "bestbuy",
+    label: "Best Buy",
+    market: "import",
+    marketLabel: "Global",
+    currency: "USD",
+    maxResults: 5,
+    timeoutMs: 5000,
+    buildSearchUrl(query) {
+      return `https://www.bestbuy.com/site/searchpage.jsp?st=${encodeURIComponent(
+        query
+      ).replace(/%20/g, "+")}`;
+    },
+    parser: parseBestBuyMarkdown,
   },
 ];
 
@@ -123,6 +158,14 @@ const ACCESSORY_KEYWORDS = [
   "mount",
   "holder",
   "tripod",
+  "support",
+  "lumbar",
+  "pillow",
+  "cushion",
+  "replacement",
+  "wheel",
+  "armrest",
+  "mat",
   "power",
   "bank",
   "ssd",
@@ -137,6 +180,15 @@ const ACCESSORY_KEYWORDS = [
   "accessory",
   "accessories",
   "magsafe",
+];
+
+const DAMAGED_LISTING_PATTERNS = [
+  "broken",
+  "for parts",
+  "parts only",
+  "damaged",
+  "wear and tear",
+  "repair",
 ];
 
 const state = {
@@ -154,6 +206,7 @@ const state = {
   exchangeRates: { ...DEFAULT_EXCHANGE_RATES },
   ratesUpdatedAt: null,
   sourceCache: {},
+  searchSessionId: 0,
   sourceStatuses: Object.fromEntries(
     SOURCE_DEFINITIONS.map((source) => [source.id, { state: "idle", detail: "" }])
   ),
@@ -406,9 +459,17 @@ async function performSearch(query) {
     return;
   }
 
+  const activeSources = getActiveSources();
+  const searchSessionId = state.searchSessionId + 1;
+  const cachedSeed = activeSources.flatMap(
+    (source) => readSourceCache(source.id, trimmedQuery) ?? []
+  );
+
+  state.searchSessionId = searchSessionId;
   state.query = trimmedQuery;
   state.searching = true;
   state.errors = [];
+  state.results = decorateOffers(dedupeOffers(cachedSeed));
   resetSourceStatuses();
   renderAll();
 
@@ -419,25 +480,47 @@ async function performSearch(query) {
   }
 
   try {
-    const activeSources = getActiveSources();
-    const searchTasks = activeSources.map((source) => searchSource(source, trimmedQuery));
-    const taskResults = await Promise.all(searchTasks);
+    const liveResults = [];
+    const searchTasks = activeSources.map(async (source) => {
+      const sourceResults = await searchSource(source, trimmedQuery, searchSessionId);
+      if (!isSearchSessionActive(searchSessionId)) {
+        return sourceResults;
+      }
 
-    const merged = dedupeOffers(taskResults.flat());
+      liveResults.push(...sourceResults);
+      state.results = decorateOffers(dedupeOffers([...cachedSeed, ...liveResults]));
+      renderSearchProgress();
+      return sourceResults;
+    });
+
+    const taskResults = await Promise.all(searchTasks);
+    if (!isSearchSessionActive(searchSessionId)) {
+      return;
+    }
+
+    const merged = dedupeOffers([...cachedSeed, ...taskResults.flat()]);
     state.results = decorateOffers(merged);
     updateHistory(trimmedQuery, state.results.length);
     persistLastRun();
   } catch (error) {
+    if (!isSearchSessionActive(searchSessionId)) {
+      return;
+    }
     console.warn(error);
     state.errors.push(error.message || "Search failed unexpectedly.");
   } finally {
+    if (!isSearchSessionActive(searchSessionId)) {
+      return;
+    }
     state.searching = false;
     renderAll();
   }
 }
 
-async function searchSource(source, query) {
-  setSourceStatus(source.id, "loading", "Scanning");
+async function searchSource(source, query, searchSessionId) {
+  if (isSearchSessionActive(searchSessionId)) {
+    setSourceStatus(source.id, "loading", "Scanning");
+  }
   try {
     const rawText = await fetchSourceText(source, query);
     const parsed = source.parser(rawText, query)
@@ -453,24 +536,30 @@ async function searchSource(source, query) {
 
     const ranked = rankOffersForQuery(parsed, query).slice(0, source.maxResults);
     writeSourceCache(source.id, query, ranked);
-    setSourceStatus(source.id, "success", `${ranked.length} offers`);
+    if (isSearchSessionActive(searchSessionId)) {
+      setSourceStatus(source.id, "success", `${ranked.length} offers`);
+    }
     return ranked;
   } catch (error) {
     const cachedOffers = readSourceCache(source.id, query);
     if (cachedOffers?.length) {
-      setSourceStatus(source.id, "success", `${cachedOffers.length} saved offers`);
+      if (isSearchSessionActive(searchSessionId)) {
+        setSourceStatus(source.id, "success", `${cachedOffers.length} saved offers`);
+      }
       return cachedOffers;
     }
 
-    setSourceStatus(source.id, "error", error.message);
-    state.errors.push(`${source.label}: ${error.message}`);
+    if (isSearchSessionActive(searchSessionId)) {
+      setSourceStatus(source.id, "error", error.message);
+      state.errors.push(`${source.label}: ${error.message}`);
+    }
     return [];
   }
 }
 
 async function fetchSourceText(source, query) {
   const readerUrl = buildReaderUrl(source.buildSearchUrl(query));
-  const timeoutMs = 12000;
+  const timeoutMs = source.timeoutMs ?? 7000;
 
   try {
     const response = await fetchWithTimeout(readerUrl, {
@@ -684,6 +773,57 @@ function parseAliExpressMarkdown(text) {
   return offers;
 }
 
+function parseWalmartMarkdown(text) {
+  const offers = [];
+  const regex =
+    /\[### (.+?) \$([\d,.]+)\]\((https?:\/\/www\.walmart\.com\/[^)]+)\)/g;
+
+  for (const match of text.matchAll(regex)) {
+    offers.push({
+      title: cleanRetailTitle(match[1]),
+      url: normalizeWalmartUrl(match[3]),
+      image: "",
+      price: parseNumericPrice(match[2]),
+    });
+  }
+
+  return offers;
+}
+
+function parseBestBuyMarkdown(text) {
+  const offers = [];
+  const lines = text.split(/\r?\n/);
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line.includes("[### ") || !line.includes("bestbuy.com/product/")) {
+      continue;
+    }
+
+    const titleMatch = line.match(
+      /\[### (.+?)\]\((https:\/\/www\.bestbuy\.com\/product\/[^)]+)\)/
+    );
+    const priceMatch = line.match(/\$([\d,]+(?:\.\d{2})?)/);
+    if (!titleMatch || !priceMatch) {
+      continue;
+    }
+
+    const imageMatch = line.match(
+      /\[!\[Image \d+: [^\]]+\]\((https?:\/\/[^)]+)\)\]\((https:\/\/www\.bestbuy\.com\/product\/[^)]+)\)/
+    );
+
+    offers.push({
+      title: cleanRetailTitle(titleMatch[1]),
+      url: titleMatch[2],
+      image: imageMatch?.[1] ?? "",
+      price: parseNumericPrice(priceMatch[1]),
+      note: /FREE/i.test(line) ? "Free shipping shown" : "",
+    });
+  }
+
+  return offers;
+}
+
 function rankOffersForQuery(offers, query) {
   const normalizedQuery = normalizeForMatch(query);
   const queryTokens = splitTokens(normalizedQuery);
@@ -736,6 +876,10 @@ function computeRelevanceScore(title, normalizedQuery, queryTokens, queryLooksAc
 
   if (!queryLooksAccessory && titleLooksAccessory) {
     return 0.1;
+  }
+
+  if (!queryAllowsDamagedListings(normalizedQuery) && looksLikeDamagedListing(normalizedTitle)) {
+    return 0.12;
   }
 
   if (queryTokens.length > 0 && hasExactSequence(titleTokens, queryTokens)) {
@@ -819,6 +963,14 @@ function hasExactSequence(titleTokens, queryTokens) {
   }
 
   return false;
+}
+
+function queryAllowsDamagedListings(normalizedQuery) {
+  return /used|refurbished|repair|parts/.test(normalizedQuery);
+}
+
+function looksLikeDamagedListing(normalizedTitle) {
+  return DAMAGED_LISTING_PATTERNS.some((pattern) => normalizedTitle.includes(pattern));
 }
 
 function decorateOffers(offers) {
@@ -1111,22 +1263,38 @@ function renderAll() {
   renderStorageSummary();
 }
 
+function renderSearchProgress() {
+  renderHeaderMeta();
+  renderSummary();
+  renderSpotlights();
+  renderIssues();
+  renderResults();
+  renderStorageSummary();
+}
+
 function renderHeaderMeta() {
   const activeSources = getActiveSources();
+  const loadingCount = Object.values(state.sourceStatuses).filter(
+    (status) => status.state === "loading"
+  ).length;
   const errorCount = Object.values(state.sourceStatuses).filter(
     (status) => status.state === "error"
   ).length;
 
   const lastScanText = state.searching
-    ? `Scanning ${activeSources.length} sources for "${state.query}"...`
+    ? loadingCount > 0
+      ? `Showing early matches while ${loadingCount} of ${activeSources.length} sources keep scanning for "${state.query}".`
+      : `Wrapping up the live scan for "${state.query}"...`
     : state.lastRun?.searchedAt
       ? `Last scan ${formatDateTime(state.lastRun.searchedAt)}. Saved data lives only in this browser.`
       : "No scan yet. Your saved deals live only in this browser.";
 
   elements.sourceNote.textContent =
-    errorCount > 0
+    state.searching
+      ? `${activeSources.length} live sources active. Fast lanes return first and cached hits can appear immediately.`
+      : errorCount > 0
       ? `${activeSources.length} live sources active. ${errorCount} source${errorCount > 1 ? "s" : ""} had issues in the last scan.`
-      : `${activeSources.length} live sources active. Domestic and import routes are ranked by final India cost.`;
+      : `${activeSources.length} live sources active. Domestic, import, and deep-source routes are ranked by final India cost.`;
   elements.lastUpdated.textContent = lastScanText;
   elements.savedCountBadge.textContent = String(state.savedOffers.length);
   elements.fxRateDisplay.textContent = formatFxLine();
@@ -1141,7 +1309,9 @@ function renderHeaderMeta() {
   elements.restoreLastButton.disabled =
     state.searching || !state.lastRun?.results?.length;
   elements.resultCountNote.textContent = state.searching
-    ? "Live scan in progress..."
+    ? state.results.length
+      ? `${getVisibleResults().length} offers are visible already. Remaining sources are still filling in.`
+      : "Fast scan in progress..."
     : state.results.length
       ? `${getVisibleResults().length} visible of ${state.results.length} total offers.`
       : "Run a search to see local versus import opportunities.";
@@ -1289,7 +1459,12 @@ function buildSpotlightCard(title, offer, badge) {
 }
 
 function renderResults() {
-  if (state.searching) {
+  const visibleOffers = getVisibleResults();
+  const loadingCount = Object.values(state.sourceStatuses).filter(
+    (status) => status.state === "loading"
+  ).length;
+
+  if (state.searching && !visibleOffers.length) {
     elements.resultsEmpty.classList.add("hidden");
     elements.resultsGrid.innerHTML = Array.from({ length: 4 })
       .map(() => '<article class="loading-card" aria-hidden="true"></article>')
@@ -1297,7 +1472,6 @@ function renderResults() {
     return;
   }
 
-  const visibleOffers = getVisibleResults();
   elements.resultsEmpty.classList.toggle("hidden", visibleOffers.length > 0);
 
   if (!visibleOffers.length) {
@@ -1305,7 +1479,16 @@ function renderResults() {
     return;
   }
 
-  elements.resultsGrid.innerHTML = visibleOffers.map(buildOfferCard).join("");
+  const cards = visibleOffers.map(buildOfferCard);
+  if (state.searching && loadingCount > 0) {
+    cards.push(
+      ...Array.from({ length: Math.min(2, loadingCount) }).map(
+        () => '<article class="loading-card loading-card-soft" aria-hidden="true"></article>'
+      )
+    );
+  }
+
+  elements.resultsGrid.innerHTML = cards.join("");
 }
 
 function buildOfferCard(offer) {
@@ -1613,6 +1796,10 @@ function setSourceStatus(sourceId, nextState, detail) {
   renderSourceChips();
 }
 
+function isSearchSessionActive(searchSessionId) {
+  return state.searchSessionId === searchSessionId;
+}
+
 function getActiveSources() {
   return SOURCE_DEFINITIONS.filter((source) =>
     state.settings.enabledSources.includes(source.id)
@@ -1898,6 +2085,25 @@ function persistSourceCache() {
       entries: state.sourceCache,
     })
   );
+}
+
+function cleanRetailTitle(title) {
+  return cleanTitle(
+    String(title ?? "").replace(
+      /^(new listing|best seller|in \d+\+ people'?s carts)\s+/i,
+      ""
+    )
+  );
+}
+
+function normalizeWalmartUrl(url) {
+  try {
+    const parsedUrl = new URL(url);
+    const redirectedUrl = parsedUrl.searchParams.get("rd");
+    return redirectedUrl ? decodeURIComponent(redirectedUrl) : url;
+  } catch (error) {
+    return url;
+  }
 }
 
 function getSystemTheme() {
